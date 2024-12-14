@@ -41,11 +41,11 @@ func main() {
 		fmt.Println("ffmpeg is not installed. Please visit https://ffmpeg.org/download.html to install it.")
 		return
 	}
-	resp := strings.ToLower(GetInputWithPrompt(reader, "do you wish to use multithreading?y/n"))
+	resp := strings.ToLower(GetInputWithPrompt(reader, "do you wish to use multithreading?y/n", "y"))
 	if resp == "y" || resp == "yes" {
 		UseMulti = true
 	}
-	resp = strings.ToLower(GetInputWithPrompt(reader, "do you wish to use hardware acceleration(experimental)?y/n"))
+	resp = strings.ToLower(GetInputWithPrompt(reader, "do you wish to use hardware acceleration(experimental)?y/n", "n"))
 	if resp == "y" || resp == "yes" {
 		UseHardwareAccel = true
 	}
@@ -68,11 +68,15 @@ func CheckFFmpegInstallation() bool {
 	return err == nil
 }
 
-func GetInputWithPrompt(r *bufio.Reader, prompt string) string {
+func GetInputWithPrompt(r *bufio.Reader, prompt string, defaultChoice ...string) string {
 	fmt.Println(prompt)
 	line, err := r.ReadString('\n')
+	line = strings.TrimSuffix(line, "\n")
+	if line == "" && len(defaultChoice) > 0 {
+		line = defaultChoice[0]
+	}
 	if err != nil {
 		log.Fatal(err)
 	}
-	return strings.TrimSuffix(line, "\n")
+	return line
 }

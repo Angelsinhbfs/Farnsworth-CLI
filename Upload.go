@@ -45,6 +45,8 @@ func HandleUpload(r *bufio.Reader, zipFiles []string) bool {
 		}
 		fileSize := fileInfo.Size()
 
+		totalChunks := (fileSize + chunkSize - 1) / chunkSize // Calculate total number of chunks
+
 		fileBar := progressbar.NewOptions64(fileSize, progressbar.OptionSetDescription(fmt.Sprintf("Uploading %s", filepath.Base(zipFile))))
 
 		metadata := AttachMetaData(filepath.Base(zipFile))
@@ -55,6 +57,7 @@ func HandleUpload(r *bufio.Reader, zipFiles []string) bool {
 		}
 
 		offset := int64(0)
+		chunkIndex := int64(0) // Initialize chunk index
 		for offset < fileSize {
 			chunk := make([]byte, chunkSize)
 			n, err := file.ReadAt(chunk, offset)
@@ -81,6 +84,19 @@ func HandleUpload(r *bufio.Reader, zipFiles []string) bool {
 			err = writer.WriteField("metadata", string(metadataJSON))
 			if err != nil {
 				fmt.Printf("Error writing metadata field: %v\n", err)
+				return false
+			}
+
+			// Add totalChunks and chunkIndex to the form data
+			err = writer.WriteField("totalChunks", fmt.Sprintf("%d", totalChunks))
+			if err != nil {
+				fmt.Printf("Error writing totalChunks field: %v\n", err)
+				return false
+			}
+
+			err = writer.WriteField("chunkIndex", fmt.Sprintf("%d", chunkIndex))
+			if err != nil {
+				fmt.Printf("Error writing chunkIndex field: %v\n", err)
 				return false
 			}
 
@@ -111,6 +127,7 @@ func HandleUpload(r *bufio.Reader, zipFiles []string) bool {
 
 			fileBar.Add(n)
 			offset += int64(n)
+			chunkIndex++ // Increment chunk index
 		}
 
 		fmt.Printf("Successfully uploaded file %s\n", zipFile)

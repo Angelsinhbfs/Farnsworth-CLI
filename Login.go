@@ -86,7 +86,7 @@ func HandleLogin(reader *bufio.Reader, jar *cookiejar.Jar, client *http.Client) 
 }
 
 func HandleConnectionInfo(r *bufio.Reader) {
-	API_BASE_URL = GetInputWithPrompt(r, "What is the URL of the instance you are connecting to?")
+	API_BASE_URL = GetInputWithPrompt(r, "What is the URL of the instance you are connecting to?", "http://localhost:8080")
 	Username = GetInputWithPrompt(r, "What is the username for the instance?")
 	fmt.Println("What is the password for this instance?(password will be hidden)")
 	bytepw, err := term.ReadPassword(int(syscall.Stdin))
@@ -94,7 +94,7 @@ func HandleConnectionInfo(r *bufio.Reader) {
 		os.Exit(1)
 	}
 	Password = string(bytepw)
-	resp := strings.ToLower(GetInputWithPrompt(r, "Do you wish to save this configuration, do not do this on shared computers? y/n"))
+	resp := strings.ToLower(GetInputWithPrompt(r, "Do you wish to save this configuration, do not do this on shared computers? y/n", "y"))
 	if resp == "y" || resp == "yes" {
 		saved := SaveConnectionInfo()
 		fmt.Printf("saved correctly: %v\n", saved)

@@ -120,6 +120,7 @@ func HandleTranscoding(r *bufio.Reader) ([]string, bool) {
 func ConfirmOrEditZipName(reader *bufio.Reader, fullPath string) string {
 	// Extract the base name of the file
 	defaultName := filepath.Base(fullPath)
+	defaultName = strings.TrimSuffix(defaultName, filepath.Ext(defaultName))
 
 	fmt.Printf("Suggested zip file name: %s\n", defaultName)
 	fmt.Print("Press Enter to confirm or type a new name: ")
@@ -240,29 +241,47 @@ func PrintHeader() string {
 }
 
 func HandleInput(input []string) bool {
-	switch input[0] {
-	case "ls":
-		fallthrough
-	case "dir":
-		files, err := os.ReadDir(cwd)
-		if checkError(err) {
-			for _, file := range files {
-				fmt.Println(file.Name())
+	if len(input) > 0 {
+		switch input[0] {
+		case "ls":
+			fallthrough
+		case "dir":
+			files, err := os.ReadDir(cwd)
+			if checkError(err) {
+				for _, file := range files {
+					fmt.Println(file.Name())
+				}
 			}
-		}
-		break
-	case "cd":
-		if input[1] == ".." {
-			cwd = path.Dir(cwd)
+			break
+		case "cd":
+			if len(input) > 1 {
+				newPath := filepath.Join(cwd, input[1])
+				cleanPath := filepath.Clean(newPath)
+				if _, err := os.Stat(cleanPath); os.IsNotExist(err) {
+					fmt.Printf("Directory %s does not exist\n", cleanPath)
+				} else {
+					cwd = cleanPath
+				}
+			} else {
+				fmt.Println("No directory specified")
+			}
+		case "set":
+			return false // Break out of the loop
+		case "quit":
+		case "q":
+			os.Exit(0)
+		case "":
+			break
+		case "-h":
+			fallthrough
+		case "--help":
+			fallthrough
+		case "h":
+			fallthrough
+		case "help":
+			fmt.Println(PrintHeader())
 			break
 		}
-		cwd = path.Join(cwd, input[1])
-		break
-	case "set":
-		return false // Break out of the loop
-	case "quit":
-	case "q":
-		os.Exit(0)
 	}
 	return true
 }
