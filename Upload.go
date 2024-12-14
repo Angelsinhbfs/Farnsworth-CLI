@@ -28,8 +28,9 @@ func HandleUpload(r *bufio.Reader, zipFiles []string) bool {
 	GenerateMetaData(r)
 	overallBar := progressbar.New(len(zipFiles))
 
+	const chunkSize = 25 * 1024 * 1024 // 25 MB
+
 	for _, zipFile := range zipFiles {
-		// Open the zip file
 		file, err := os.Open(zipFile)
 		if err != nil {
 			fmt.Printf("Error opening file %s: %v\n", zipFile, err)
@@ -37,7 +38,6 @@ func HandleUpload(r *bufio.Reader, zipFiles []string) bool {
 		}
 		defer file.Close()
 
-		// Get the file size for the progress bar
 		fileInfo, err := file.Stat()
 		if err != nil {
 			fmt.Printf("Error getting file info: %v\n", err)
@@ -45,73 +45,75 @@ func HandleUpload(r *bufio.Reader, zipFiles []string) bool {
 		}
 		fileSize := fileInfo.Size()
 
-		// Create a progress bar for the file upload
 		fileBar := progressbar.NewOptions64(fileSize, progressbar.OptionSetDescription(fmt.Sprintf("Uploading %s", filepath.Base(zipFile))))
 
-		// Create a new buffer to hold the form data
-		var requestBody bytes.Buffer
-		writer := multipart.NewWriter(&requestBody)
-
-		// Add the zip file to the form
-		part, err := writer.CreateFormFile("file", filepath.Base(zipFile))
-		if err != nil {
-			fmt.Printf("Error creating form file: %v\n", err)
-			return false
-		}
-
-		// Use ProgressReader to track upload progress
-		progressReader := &ProgressReader{Reader: file, bar: fileBar}
-		_, err = io.Copy(part, progressReader)
-		if err != nil {
-			fmt.Printf("Error copying file data: %v\n", err)
-			return false
-		}
-
-		// Add metadata to the form
 		metadata := AttachMetaData(filepath.Base(zipFile))
 		metadataJSON, err := json.Marshal(metadata)
 		if err != nil {
 			fmt.Printf("Error marshalling metadata: %v\n", err)
 			return false
 		}
-		err = writer.WriteField("metadata", string(metadataJSON))
-		if err != nil {
-			fmt.Printf("Error writing metadata field: %v\n", err)
-			return false
+
+		offset := int64(0)
+		for offset < fileSize {
+			chunk := make([]byte, chunkSize)
+			n, err := file.ReadAt(chunk, offset)
+			if err != nil && err != io.EOF {
+				fmt.Printf("Error reading file chunk: %v\n", err)
+				return false
+			}
+
+			var requestBody bytes.Buffer
+			writer := multipart.NewWriter(&requestBody)
+
+			part, err := writer.CreateFormFile("file", filepath.Base(zipFile))
+			if err != nil {
+				fmt.Printf("Error creating form file: %v\n", err)
+				return false
+			}
+
+			_, err = part.Write(chunk[:n])
+			if err != nil {
+				fmt.Printf("Error writing chunk to form: %v\n", err)
+				return false
+			}
+
+			err = writer.WriteField("metadata", string(metadataJSON))
+			if err != nil {
+				fmt.Printf("Error writing metadata field: %v\n", err)
+				return false
+			}
+
+			writer.Close()
+
+			requestURL := fmt.Sprintf("%v/upload/", API_BASE_URL)
+			req, err := http.NewRequest("POST", requestURL, &requestBody)
+			if err != nil {
+				fmt.Printf("Error creating request: %v\n", err)
+				return false
+			}
+
+			req.Header.Set("Content-Type", writer.FormDataContentType())
+			req.Header.Set("Authorization", "Bearer "+Token)
+
+			client := &http.Client{}
+			resp, err := client.Do(req)
+			if err != nil {
+				fmt.Printf("Error sending request: %v\n", err)
+				return false
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusOK {
+				fmt.Printf("Upload failed for file %s: %s\n", zipFile, resp.Status)
+				return false
+			}
+
+			fileBar.Add(n)
+			offset += int64(n)
 		}
 
-		// Close the writer to finalize the form data
-		writer.Close()
-
-		// Create the HTTP request
-		requestURL := fmt.Sprintf("%v/upload/", API_BASE_URL)
-		req, err := http.NewRequest("POST", requestURL, &requestBody)
-		if err != nil {
-			fmt.Printf("Error creating request: %v\n", err)
-			return false
-		}
-
-		// Set headers
-		req.Header.Set("Content-Type", writer.FormDataContentType())
-		req.Header.Set("Authorization", "Bearer "+Token)
-
-		// Send the request
-		client := &http.Client{}
-		resp, err := client.Do(req)
-		if err != nil {
-			fmt.Printf("Error sending request: %v\n", err)
-			return false
-		}
-		defer resp.Body.Close()
-
-		// Check the response
-		if resp.StatusCode != http.StatusOK {
-			fmt.Printf("Upload failed for file %s: %s\n", zipFile, resp.Status)
-		} else {
-
-			fmt.Printf("Successfully uploaded file %s\n", zipFile)
-		}
-
+		fmt.Printf("Successfully uploaded file %s\n", zipFile)
 		overallBar.Add(1)
 	}
 
