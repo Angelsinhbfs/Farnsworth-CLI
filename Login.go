@@ -81,7 +81,10 @@ func HandleLogin(reader *bufio.Reader, jar *cookiejar.Jar, client *http.Client) 
 	}
 
 	requestURL := fmt.Sprintf("%v/login/", API_BASE_URL)
-	req, _ := http.NewRequest("GET", requestURL, nil)
+	req, err := http.NewRequest("GET", requestURL, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
 	req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(Username+":"+Password)))
 	res, err := client.Do(req)
 	if err != nil {

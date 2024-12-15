@@ -92,6 +92,7 @@ func GetInputWithPrompt(r *bufio.Reader, prompt string, defaultChoice ...string)
 	fmt.Println(prompt)
 	line, err := r.ReadString('\n')
 	line = strings.TrimSuffix(line, "\n")
+	line = strings.TrimSuffix(line, "\r") //fucking windows
 	if line == "" && len(defaultChoice) > 0 {
 		line = defaultChoice[0]
 	}
