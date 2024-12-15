@@ -25,47 +25,47 @@ func HandleUpload(r *bufio.Reader, zipFiles []string) bool {
 	// Create a new progress bar container
 	p := mpb.New()
 
+	var wg sync.WaitGroup
+	errorChan := make(chan error, len(zipFiles))
+
 	for _, zipFile := range zipFiles {
-		file, err := os.Open(zipFile)
-		if err != nil {
-			fmt.Printf("Error opening file %s: %v\n", zipFile, err)
-			return false
-		}
-		defer file.Close()
+		wg.Add(1)
+		go func(zipFile string) {
+			defer wg.Done()
 
-		fileInfo, err := file.Stat()
-		if err != nil {
-			fmt.Printf("Error getting file info: %v\n", err)
-			return false
-		}
-		fileSize := fileInfo.Size()
+			file, err := os.Open(zipFile)
+			if err != nil {
+				errorChan <- fmt.Errorf("error opening file %s: %v", zipFile, err)
+				return
+			}
+			defer file.Close()
 
-		totalChunks := (fileSize + chunkSize - 1) / chunkSize // Calculate total number of chunks
+			fileInfo, err := file.Stat()
+			if err != nil {
+				errorChan <- fmt.Errorf("error getting file info: %v", err)
+				return
+			}
+			fileSize := fileInfo.Size()
 
-		// Create a progress bar for the file
-		fileBar := p.AddBar(fileSize,
-			mpb.PrependDecorators(
-				decor.Name(fmt.Sprintf("Uploading %s: ", filepath.Base(zipFile))),
-				decor.CountersKibiByte("% .2f / % .2f"),
-			),
-			mpb.AppendDecorators(decor.Percentage()),
-		)
+			totalChunks := (fileSize + chunkSize - 1) / chunkSize // Calculate total number of chunks
 
-		metadata := AttachMetaData(filepath.Base(zipFile))
-		metadataJSON, err := json.Marshal(metadata)
-		if err != nil {
-			fmt.Printf("Error marshalling metadata: %v\n", err)
-			return false
-		}
+			// Create a progress bar for the file
+			fileBar := p.AddBar(fileSize,
+				mpb.PrependDecorators(
+					decor.Name(fmt.Sprintf("Uploading %s: ", filepath.Base(zipFile))),
+					decor.CountersKibiByte("% .2f / % .2f"),
+				),
+				mpb.AppendDecorators(decor.Percentage()),
+			)
 
-		var wg sync.WaitGroup
-		errorChan := make(chan error, totalChunks)
+			metadata := AttachMetaData(filepath.Base(zipFile))
+			metadataJSON, err := json.Marshal(metadata)
+			if err != nil {
+				errorChan <- fmt.Errorf("error marshalling metadata: %v", err)
+				return
+			}
 
-		for offset := int64(0); offset < fileSize; offset += chunkSize {
-			wg.Add(1)
-			go func(offset int64) {
-				defer wg.Done()
-
+			for offset := int64(0); offset < fileSize; offset += chunkSize {
 				chunk := make([]byte, chunkSize)
 				n, err := file.ReadAt(chunk, offset)
 				if err != nil && err != io.EOF {
@@ -134,20 +134,20 @@ func HandleUpload(r *bufio.Reader, zipFiles []string) bool {
 				}
 
 				fileBar.IncrBy(n)
-			}(offset)
-		}
-
-		wg.Wait()
-		close(errorChan)
-
-		for err := range errorChan {
-			if err != nil {
-				fmt.Println(err)
-				return false
 			}
-		}
 
-		fmt.Printf("Successfully uploaded file %s\n", zipFile)
+			fmt.Printf("Successfully uploaded file %s\n", zipFile)
+		}(zipFile)
+	}
+
+	wg.Wait()
+	close(errorChan)
+
+	for err := range errorChan {
+		if err != nil {
+			fmt.Println(err)
+			return false
+		}
 	}
 
 	// Wait for all bars to complete

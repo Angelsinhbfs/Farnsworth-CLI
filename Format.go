@@ -67,7 +67,7 @@ func GenerateMetaData(r *bufio.Reader) {
 
 func AttachMetaData(filename string) MediaIndexEntry {
 	return MediaIndexEntry{
-		Title:       filename,
+		Title:       strings.TrimSuffix(filename, ".zip"),
 		Description: Description,
 		Genre:       Genre,
 		Tags:        Tags,

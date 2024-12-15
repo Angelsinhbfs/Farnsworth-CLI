@@ -39,44 +39,44 @@ func HandleLogin(reader *bufio.Reader, jar *cookiejar.Jar, client *http.Client) 
 	if len(credsFiles) == 0 {
 		fmt.Println("No credentials files found.")
 		HandleConnectionInfo(reader)
-		return false
-	}
 
-	fmt.Println("Available credentials files:")
-	for i, file := range credsFiles {
-		fmt.Printf("%d: %s\n", i+1, file)
-	}
-
-	choice := GetInputWithPrompt(reader, "Select a credentials file by number (0 for new): ")
-	index, err := strconv.Atoi(choice)
-	if err != nil || index < 0 || index > len(credsFiles) {
-		fmt.Println("Invalid choice.")
-		return false
-	}
-	if index == 0 {
-		HandleConnectionInfo(reader)
 	} else {
-		credsPath := filepath.Join(execDir, credsFiles[index-1])
-		file, err := os.Open(credsPath)
-		if err != nil {
-			log.Fatal(err)
-		}
-		defer file.Close()
-
-		scanner := bufio.NewScanner(file)
-		var lines []string
-		lines = make([]string, 2)
-		i := 0
-		for scanner.Scan() {
-			lines[i] = scanner.Text()
-			i++
+		fmt.Println("Available credentials files:")
+		for i, file := range credsFiles {
+			fmt.Printf("%d: %s\n", i+1, file)
 		}
 
-		if err := scanner.Err(); err != nil {
-			log.Fatal(err)
+		choice := GetInputWithPrompt(reader, "Select a credentials file by number (0 for new): ")
+		index, err := strconv.Atoi(choice)
+		if err != nil || index < 0 || index > len(credsFiles) {
+			fmt.Println("Invalid choice.")
+			return false
 		}
-		if !SetConnectionFromFile(lines) {
+		if index == 0 {
 			HandleConnectionInfo(reader)
+		} else {
+			credsPath := filepath.Join(execDir, credsFiles[index-1])
+			file, err := os.Open(credsPath)
+			if err != nil {
+				log.Fatal(err)
+			}
+			defer file.Close()
+
+			scanner := bufio.NewScanner(file)
+			var lines []string
+			lines = make([]string, 2)
+			i := 0
+			for scanner.Scan() {
+				lines[i] = scanner.Text()
+				i++
+			}
+
+			if err := scanner.Err(); err != nil {
+				log.Fatal(err)
+			}
+			if !SetConnectionFromFile(lines) {
+				HandleConnectionInfo(reader)
+			}
 		}
 	}
 
