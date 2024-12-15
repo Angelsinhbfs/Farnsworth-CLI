@@ -34,7 +34,7 @@ jobs:
       run: |
         GOOS=${{ matrix.os == 'ubuntu-latest' && 'linux' || matrix.os == 'windows-latest' && 'windows' || 'darwin' }}
         GOARCH=${{ matrix.arch }}
-        OUTPUT_NAME=myapp-${GOOS}-${GOARCH}
+        OUTPUT_NAME=FCLI
         if [ "${{ matrix.os }}" == "windows-latest" ]; then OUTPUT_NAME+=".exe"; fi
         go build -o $OUTPUT_NAME
 
