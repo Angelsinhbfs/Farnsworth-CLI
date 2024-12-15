@@ -1,0 +1,42 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        go-version: [1.20] # Specify the Go version you want to use
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        arch: [amd64, arm64]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ matrix.go-version }}
+
+    - name: Build
+      run: |
+        GOOS=${{ matrix.os == 'ubuntu-latest' && 'linux' || matrix.os == 'windows-latest' && 'windows' || 'darwin' }}
+        GOARCH=${{ matrix.arch }}
+        OUTPUT_NAME=myapp-${GOOS}-${GOARCH}
+        if [ "${{ matrix.os }}" == "windows-latest" ]; then OUTPUT_NAME+=".exe"; fi
+        go build -o $OUTPUT_NAME
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: myapp-${{ matrix.os }}-${{ matrix.arch }}
+        path: myapp-${{ matrix.os == 'ubuntu-latest' && 'linux' || matrix.os == 'windows-latest' && 'windows' || 'darwin' }}-${{ matrix.arch }}*
