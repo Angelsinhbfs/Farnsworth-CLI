@@ -3,14 +3,18 @@ package main
 import (
 	"archive/zip"
 	"bufio"
+	"bytes"
+	"encoding/json"
 	"fmt"
-	"github.com/schollz/progressbar/v3"
+	"github.com/vbauerster/mpb/v8"
+	"github.com/vbauerster/mpb/v8/decor"
 	"io"
 	"log"
 	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -26,59 +30,79 @@ func HandleTranscoding(r *bufio.Reader) ([]string, bool) {
 	for HandleInput(GatherInput(r)) {
 		fmt.Printf("%v:>", cwd)
 	}
+
 	var zipFiles []string
-	// Directory has been found. Get files
+	// Check for existing zip files
 	files, err := os.ReadDir(cwd)
 	if checkError(err) {
-		var wg sync.WaitGroup
-		totalFiles := len(files)
-		overallBar := progressbar.New(totalFiles)
-
 		for _, file := range files {
-			if !file.IsDir() {
-				inputFile := path.Join(cwd, file.Name())
-				fn := file.Name()
-				outputDir := path.Join(cwd, strings.TrimSuffix(fn, filepath.Ext(fn)))
-				err := os.MkdirAll(outputDir, os.ModePerm)
-				if err != nil {
-					log.Fatal(err)
-				}
-				outputFile := path.Join(outputDir, "output.m3u8")
+			if !file.IsDir() && strings.HasSuffix(file.Name(), ".zip") {
+				zipFiles = append(zipFiles, path.Join(cwd, file.Name()))
+			}
+		}
+	}
 
-				fileBar := progressbar.NewOptions(2, progressbar.OptionSetDescription(fmt.Sprintf("Processing %s", fn)))
+	// If zip files are found, offer to use them
+	if len(zipFiles) > 0 {
+		fmt.Println("Existing zip files found:")
+		for _, zipFile := range zipFiles {
+			fmt.Println(zipFile)
+		}
+		choice := GetInputWithPrompt(r, "Do you want to use these zip files instead of re-transcoding? (y/n): ")
+		if choice == "y" || choice == "Y" {
+			return zipFiles, true
+		}
+	}
 
-				if UseMulti {
-					wg.Add(1)
-					go func(inputFile, outputFile string) {
-						defer wg.Done()
-						err := TranscodeToHLS(inputFile, outputFile)
-						if err != nil {
-							log.Printf("Error transcoding file %s: %v", path.Base(inputFile), err)
-						}
-						fileBar.Add(1) // Update progress bar for transcoding
+	// Create a new progress bar container
+	p := mpb.New()
 
-						zipFileName := outputDir + ".zip"
-						err = ZipDirectory(outputDir, outputDir+".zip")
-						if err != nil {
-							log.Printf("Error zipping directory %s: %v", outputDir, err)
-						} else {
-							zipFiles = append(zipFiles, zipFileName)
-						}
-						fileBar.Add(1) // Update progress bar for zipping
-						// Delete the output directory after zipping
-						err = os.RemoveAll(outputDir)
-						if err != nil {
-							log.Printf("Error deleting directory %s: %v", outputDir, err)
-						}
+	var wg sync.WaitGroup
+	totalFiles := len(files)
 
-						overallBar.Add(1) // Update overall progress bar
-					}(inputFile, outputFile)
-				} else {
-					err := TranscodeToHLS(inputFile, outputFile)
+	// Create an overall progress bar
+	overallBar := p.AddBar(int64(totalFiles),
+		mpb.PrependDecorators(
+			decor.Name("Overall Progress: "),
+			decor.CountersNoUnit("%d / %d"),
+		),
+		mpb.AppendDecorators(decor.Percentage()),
+	)
+
+	for _, file := range files {
+		if !file.IsDir() && isMediaFile(file.Name()) {
+			inputFile := path.Join(cwd, file.Name())
+			fn := file.Name()
+			outputDir := path.Join(cwd, strings.TrimSuffix(fn, filepath.Ext(fn)))
+			err := os.MkdirAll(outputDir, os.ModePerm)
+			if err != nil {
+				log.Fatal(err)
+			}
+			outputFile := path.Join(outputDir, "output.m3u8")
+
+			// Get the total number of frames
+			totalFrames, err := getTotalFrames(inputFile)
+			if err != nil {
+				log.Printf("Error getting total frames for file %s: %v\nguessing around 60000", fn, err)
+				totalFrames = 60000
+			}
+			// Create a progress bar for the file
+			fileBar := p.AddBar(totalFrames,
+				mpb.PrependDecorators(
+					decor.Name(fmt.Sprintf("Processing %s: ", fn)),
+				),
+				mpb.AppendDecorators(decor.Percentage()),
+			)
+
+			if UseMulti {
+				wg.Add(1)
+				go func(inputFile, outputFile string) {
+					defer wg.Done()
+					err := TranscodeToHLS(inputFile, outputFile, fileBar)
 					if err != nil {
-						log.Printf("Error transcoding file %s: %v", file.Name(), err)
+						log.Printf("Error transcoding file %s: %v", path.Base(inputFile), err)
 					}
-					fileBar.Add(1) // Update progress bar for transcoding
+					fileBar.Increment() // Update progress bar for transcoding
 
 					zipFileName := outputDir + ".zip"
 					err = ZipDirectory(outputDir, outputDir+".zip")
@@ -87,34 +111,112 @@ func HandleTranscoding(r *bufio.Reader) ([]string, bool) {
 					} else {
 						zipFiles = append(zipFiles, zipFileName)
 					}
-					fileBar.Add(1) // Update progress bar for zipping
+					fileBar.Increment() // Update progress bar for zipping
 					// Delete the output directory after zipping
 					err = os.RemoveAll(outputDir)
 					if err != nil {
 						log.Printf("Error deleting directory %s: %v", outputDir, err)
 					}
 
-					overallBar.Add(1) // Update overall progress bar
-				}
+					overallBar.Increment() // Update overall progress bar
+				}(inputFile, outputFile)
 			} else {
-				overallBar.Add(1)
-			}
-		}
-		wg.Wait() // Wait for all goroutines to finish
-		// Confirm or edit zip file names
-		for i, zipFile := range zipFiles {
-			newName := ConfirmOrEditZipName(r, zipFile)
-			if newName != zipFile {
-				err := os.Rename(zipFile, newName)
+				err := TranscodeToHLS(inputFile, outputFile, fileBar)
 				if err != nil {
-					log.Printf("Error renaming file %s to %s: %v", zipFile, newName, err)
-				} else {
-					zipFiles[i] = newName // Update the slice with the new name
+					log.Printf("Error transcoding file %s: %v", file.Name(), err)
 				}
+				fileBar.Increment() // Update progress bar for transcoding
+
+				zipFileName := outputDir + ".zip"
+				err = ZipDirectory(outputDir, outputDir+".zip")
+				if err != nil {
+					log.Printf("Error zipping directory %s: %v", outputDir, err)
+				} else {
+					zipFiles = append(zipFiles, zipFileName)
+				}
+				fileBar.Increment() // Update progress bar for zipping
+				// Delete the output directory after zipping
+				err = os.RemoveAll(outputDir)
+				if err != nil {
+					log.Printf("Error deleting directory %s: %v", outputDir, err)
+				}
+
+				overallBar.Increment() // Update overall progress bar
+			}
+		} else {
+			overallBar.Increment()
+		}
+	}
+	wg.Wait() // Wait for all goroutines to finish
+
+	// Wait for all bars to complete
+	p.Wait()
+
+	// Confirm or edit zip file names
+	for i, zipFile := range zipFiles {
+		newName := ConfirmOrEditZipName(r, zipFile)
+		if newName != zipFile {
+			err := os.Rename(zipFile, newName)
+			if err != nil {
+				log.Printf("Error renaming file %s to %s: %v", zipFile, newName, err)
+			} else {
+				zipFiles[i] = newName // Update the slice with the new name
 			}
 		}
 	}
+
 	return zipFiles, true
+}
+
+// Function to get the total number of frames using ffprobe
+func getTotalFrames(inputFile string) (int64, error) {
+	cmd := exec.Command("ffprobe", "-v", "error", "-select_streams", "v:0", "-count_frames", "-show_entries", "stream=nb_read_frames", "-of", "json", inputFile)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	err := cmd.Run()
+	if err != nil {
+		return 0, fmt.Errorf("error running ffprobe: %v", err)
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+		return 0, fmt.Errorf("error parsing ffprobe output: %v", err)
+	}
+
+	streams, ok := result["streams"].([]interface{})
+	if !ok || len(streams) == 0 {
+		return 0, fmt.Errorf("no streams found in ffprobe output")
+	}
+
+	stream, ok := streams[0].(map[string]interface{})
+	if !ok {
+		return 0, fmt.Errorf("invalid stream data in ffprobe output")
+	}
+
+	nbReadFrames, ok := stream["nb_read_frames"].(string)
+	if !ok {
+		return 0, fmt.Errorf("frame count not found in ffprobe output")
+	}
+
+	frameCount, err := strconv.ParseInt(nbReadFrames, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("error converting frame count: %v", err)
+	}
+
+	return frameCount, nil
+}
+
+func isMediaFile(fileName string) bool {
+	// Define common video and audio file extensions
+	mediaExtensions := []string{".mp4", ".avi", ".mkv", ".mov", ".mp3", ".wav", ".flac", ".aac"}
+
+	ext := strings.ToLower(filepath.Ext(fileName))
+	for _, mediaExt := range mediaExtensions {
+		if ext == mediaExt {
+			return true
+		}
+	}
+	return false
 }
 
 func ConfirmOrEditZipName(reader *bufio.Reader, fullPath string) string {
@@ -134,31 +236,52 @@ func ConfirmOrEditZipName(reader *bufio.Reader, fullPath string) string {
 	return newFullPath
 }
 
-func TranscodeToHLS(inputFile, outputFile string) error {
-	// Determine available GPU encoding
+func TranscodeToHLS(inputFile, outputFile string, fileBar *mpb.Bar) error {
 	encoder := getAvailableEncoder()
 
 	var cmd *exec.Cmd
-	//todo: get this actually working
 	if encoder == "h264_nvenc" {
-		// Use NVIDIA NVENC
-		cmd = exec.Command("ffmpeg", "-i", inputFile, "-c:v", "h264_nvenc", "-c:a", "aac", "-strict", "experimental", "-start_number", "0", "-hls_time", "10", "-hls_list_size", "0", "-f", "hls", outputFile)
+		cmd = exec.Command("ffmpeg", "-i", inputFile, "-c:v", "h264_nvenc", "-c:a", "aac", "-strict", "experimental", "-start_number", "0", "-hls_time", "10", "-hls_list_size", "0", "-f", "hls", outputFile, "-progress", "pipe:2")
 	} else if encoder == "h264_amf" {
-		// Use AMD AMF
-		cmd = exec.Command("ffmpeg", "-i", inputFile, "-c:v", "h264_amf", "-c:a", "aac", "-strict", "experimental", "-start_number", "0", "-hls_time", "10", "-hls_list_size", "0", "-f", "hls", outputFile)
+		cmd = exec.Command("ffmpeg", "-i", inputFile, "-c:v", "h264_amf", "-c:a", "aac", "-strict", "experimental", "-start_number", "0", "-hls_time", "10", "-hls_list_size", "0", "-f", "hls", outputFile, "-progress", "pipe:2")
 	} else {
-		// Fallback to CPU encoding
-		cmd = exec.Command("ffmpeg", "-i", inputFile, "-c:v", "libx264", "-c:a", "aac", "-strict", "experimental", "-start_number", "0", "-hls_time", "10", "-hls_list_size", "0", "-f", "hls", outputFile)
+		cmd = exec.Command("ffmpeg", "-i", inputFile, "-c:v", "libx264", "-c:a", "aac", "-strict", "experimental", "-start_number", "0", "-hls_time", "10", "-hls_list_size", "0", "-f", "hls", outputFile, "-progress", "pipe:2")
 	}
 
-	// Suppress standard output
-	cmd.Stdout = os.Stdout
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("error creating stderr pipe: %v", err)
+	}
 
-	// Capture standard error
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("error starting ffmpeg command: %v", err)
+	}
 
-	cmd.Stderr = os.Stderr
+	scanner := bufio.NewScanner(stderr)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "frame=") {
+			// Extract the frame number
+			parts := strings.Fields(line)
+			if len(parts) > 1 {
+				frameStr := parts[1]
+				frame, err := strconv.Atoi(frameStr)
+				if err == nil {
+					fileBar.SetCurrent(int64(frame)) // Update the progress bar with the current frame
+				}
+			}
+		}
+	}
 
-	return cmd.Run()
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("error reading ffmpeg output: %v", err)
+	}
+
+	if err := cmd.Wait(); err != nil {
+		return fmt.Errorf("ffmpeg command failed: %v", err)
+	}
+
+	return nil
 }
 
 func getAvailableEncoder() string {

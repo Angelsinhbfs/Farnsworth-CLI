@@ -5,30 +5,25 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"github.com/schollz/progressbar/v3"
+	"github.com/vbauerster/mpb/v8"
+	"github.com/vbauerster/mpb/v8/decor"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
+	"time"
 )
-
-type ProgressReader struct {
-	io.Reader
-	bar *progressbar.ProgressBar
-}
-
-func (pr *ProgressReader) Read(p []byte) (int, error) {
-	n, err := pr.Reader.Read(p)
-	pr.bar.Add(n)
-	return n, err
-}
 
 func HandleUpload(r *bufio.Reader, zipFiles []string) bool {
 	GenerateMetaData(r)
-	overallBar := progressbar.New(len(zipFiles))
+	fmt.Println("Initiating swarm upload")
 
-	const chunkSize = 25 * 1024 * 1024 // 25 MB
+	const chunkSize = 15 * 1024 * 1024 // 15 MB
+
+	// Create a new progress bar container
+	p := mpb.New()
 
 	for _, zipFile := range zipFiles {
 		file, err := os.Open(zipFile)
@@ -47,7 +42,14 @@ func HandleUpload(r *bufio.Reader, zipFiles []string) bool {
 
 		totalChunks := (fileSize + chunkSize - 1) / chunkSize // Calculate total number of chunks
 
-		fileBar := progressbar.NewOptions64(fileSize, progressbar.OptionSetDescription(fmt.Sprintf("Uploading %s", filepath.Base(zipFile))))
+		// Create a progress bar for the file
+		fileBar := p.AddBar(fileSize,
+			mpb.PrependDecorators(
+				decor.Name(fmt.Sprintf("Uploading %s: ", filepath.Base(zipFile))),
+				decor.CountersKibiByte("% .2f / % .2f"),
+			),
+			mpb.AppendDecorators(decor.Percentage()),
+		)
 
 		metadata := AttachMetaData(filepath.Base(zipFile))
 		metadataJSON, err := json.Marshal(metadata)
@@ -56,83 +58,100 @@ func HandleUpload(r *bufio.Reader, zipFiles []string) bool {
 			return false
 		}
 
-		offset := int64(0)
-		chunkIndex := int64(0) // Initialize chunk index
-		for offset < fileSize {
-			chunk := make([]byte, chunkSize)
-			n, err := file.ReadAt(chunk, offset)
-			if err != nil && err != io.EOF {
-				fmt.Printf("Error reading file chunk: %v\n", err)
-				return false
-			}
+		var wg sync.WaitGroup
+		errorChan := make(chan error, totalChunks)
 
-			var requestBody bytes.Buffer
-			writer := multipart.NewWriter(&requestBody)
+		for offset := int64(0); offset < fileSize; offset += chunkSize {
+			wg.Add(1)
+			go func(offset int64) {
+				defer wg.Done()
 
-			part, err := writer.CreateFormFile("file", filepath.Base(zipFile))
+				chunk := make([]byte, chunkSize)
+				n, err := file.ReadAt(chunk, offset)
+				if err != nil && err != io.EOF {
+					errorChan <- fmt.Errorf("error reading file chunk: %v", err)
+					return
+				}
+
+				var requestBody bytes.Buffer
+				writer := multipart.NewWriter(&requestBody)
+
+				part, err := writer.CreateFormFile("file", filepath.Base(zipFile))
+				if err != nil {
+					errorChan <- fmt.Errorf("error creating form file: %v", err)
+					return
+				}
+
+				_, err = part.Write(chunk[:n])
+				if err != nil {
+					errorChan <- fmt.Errorf("error writing chunk to form: %v", err)
+					return
+				}
+
+				err = writer.WriteField("metadata", string(metadataJSON))
+				if err != nil {
+					errorChan <- fmt.Errorf("error writing metadata field: %v", err)
+					return
+				}
+
+				err = writer.WriteField("totalChunks", fmt.Sprintf("%d", totalChunks))
+				if err != nil {
+					errorChan <- fmt.Errorf("error writing totalChunks field: %v", err)
+					return
+				}
+
+				err = writer.WriteField("chunkIndex", fmt.Sprintf("%d", offset/chunkSize))
+				if err != nil {
+					errorChan <- fmt.Errorf("error writing chunkIndex field: %v", err)
+					return
+				}
+
+				writer.Close()
+
+				requestURL := fmt.Sprintf("%v/upload/", API_BASE_URL)
+				req, err := http.NewRequest("POST", requestURL, &requestBody)
+				if err != nil {
+					errorChan <- fmt.Errorf("error creating request: %v", err)
+					return
+				}
+
+				req.Header.Set("Content-Type", writer.FormDataContentType())
+				req.Header.Set("Authorization", "Bearer "+Token)
+
+				client := &http.Client{
+					Timeout: time.Minute * 30,
+				}
+				resp, err := client.Do(req)
+				if err != nil {
+					errorChan <- fmt.Errorf("error sending request: %v", err)
+					return
+				}
+				defer resp.Body.Close()
+
+				if resp.StatusCode != http.StatusOK {
+					errorChan <- fmt.Errorf("upload failed for file %s: %s", zipFile, resp.Status)
+					return
+				}
+
+				fileBar.IncrBy(n)
+			}(offset)
+		}
+
+		wg.Wait()
+		close(errorChan)
+
+		for err := range errorChan {
 			if err != nil {
-				fmt.Printf("Error creating form file: %v\n", err)
+				fmt.Println(err)
 				return false
 			}
-
-			_, err = part.Write(chunk[:n])
-			if err != nil {
-				fmt.Printf("Error writing chunk to form: %v\n", err)
-				return false
-			}
-
-			err = writer.WriteField("metadata", string(metadataJSON))
-			if err != nil {
-				fmt.Printf("Error writing metadata field: %v\n", err)
-				return false
-			}
-
-			// Add totalChunks and chunkIndex to the form data
-			err = writer.WriteField("totalChunks", fmt.Sprintf("%d", totalChunks))
-			if err != nil {
-				fmt.Printf("Error writing totalChunks field: %v\n", err)
-				return false
-			}
-
-			err = writer.WriteField("chunkIndex", fmt.Sprintf("%d", chunkIndex))
-			if err != nil {
-				fmt.Printf("Error writing chunkIndex field: %v\n", err)
-				return false
-			}
-
-			writer.Close()
-
-			requestURL := fmt.Sprintf("%v/upload/", API_BASE_URL)
-			req, err := http.NewRequest("POST", requestURL, &requestBody)
-			if err != nil {
-				fmt.Printf("Error creating request: %v\n", err)
-				return false
-			}
-
-			req.Header.Set("Content-Type", writer.FormDataContentType())
-			req.Header.Set("Authorization", "Bearer "+Token)
-
-			client := &http.Client{}
-			resp, err := client.Do(req)
-			if err != nil {
-				fmt.Printf("Error sending request: %v\n", err)
-				return false
-			}
-			defer resp.Body.Close()
-
-			if resp.StatusCode != http.StatusOK {
-				fmt.Printf("Upload failed for file %s: %s\n", zipFile, resp.Status)
-				return false
-			}
-
-			fileBar.Add(n)
-			offset += int64(n)
-			chunkIndex++ // Increment chunk index
 		}
 
 		fmt.Printf("Successfully uploaded file %s\n", zipFile)
-		overallBar.Add(1)
 	}
+
+	// Wait for all bars to complete
+	p.Wait()
 
 	return true
 }
