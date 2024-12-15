@@ -34,7 +34,7 @@ jobs:
       run: |
         GOOS=${{ matrix.os == 'ubuntu-latest' && 'linux' || matrix.os == 'windows-latest' && 'windows' || 'darwin' }}
         GOARCH=${{ matrix.arch }}
-        OUTPUT_NAME=FCLI-${{ matrix.os }}
+        OUTPUT_NAME=FCLI-${GOOS}
         if [ "${{ matrix.os }}" == "windows-latest" ]; then OUTPUT_NAME+=".exe"; fi
         go build -o $OUTPUT_NAME
 
@@ -42,4 +42,4 @@ jobs:
       uses: actions/upload-artifact@v3
       with:
         name: FCLI-${{ matrix.os }}
-        path: FCLI-${{ matrix.os == 'ubuntu-latest' && 'linux' || matrix.os == 'windows-latest' && 'windows' || 'darwin' }}
+        path: FCLI-${{ matrix.os == 'ubuntu-latest' && 'linux' || matrix.os == 'windows-latest' && 'windows' || 'darwin' }}*
