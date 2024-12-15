@@ -102,16 +102,21 @@ func HandleTranscoding(r *bufio.Reader) ([]string, bool) {
 					if err != nil {
 						log.Printf("Error transcoding file %s: %v", path.Base(inputFile), err)
 					}
-					fileBar.Increment() // Update progress bar for transcoding
+
+					// Increment the fileBar based on actual progress
+					fileBar.SetTotal(totalFrames, true) // Mark transcoding as complete
 
 					zipFileName := outputDir + ".zip"
-					err = ZipDirectory(outputDir, outputDir+".zip")
+					err = ZipDirectory(outputDir, zipFileName)
 					if err != nil {
 						log.Printf("Error zipping directory %s: %v", outputDir, err)
 					} else {
 						zipFiles = append(zipFiles, zipFileName)
 					}
-					fileBar.Increment() // Update progress bar for zipping
+
+					// Increment the fileBar to mark zipping as complete
+					fileBar.SetTotal(totalFrames+1, true) // Assuming zipping is one additional step
+
 					// Delete the output directory after zipping
 					err = os.RemoveAll(outputDir)
 					if err != nil {
@@ -125,17 +130,19 @@ func HandleTranscoding(r *bufio.Reader) ([]string, bool) {
 				if err != nil {
 					log.Printf("Error transcoding file %s: %v", file.Name(), err)
 				}
-				fileBar.Increment() // Update progress bar for transcoding
+
+				fileBar.SetTotal(totalFrames, true) // Mark transcoding as complete
 
 				zipFileName := outputDir + ".zip"
-				err = ZipDirectory(outputDir, outputDir+".zip")
+				err = ZipDirectory(outputDir, zipFileName)
 				if err != nil {
 					log.Printf("Error zipping directory %s: %v", outputDir, err)
 				} else {
 					zipFiles = append(zipFiles, zipFileName)
 				}
-				fileBar.Increment() // Update progress bar for zipping
-				// Delete the output directory after zipping
+
+				fileBar.SetTotal(totalFrames+1, true) // Mark zipping as complete
+
 				err = os.RemoveAll(outputDir)
 				if err != nil {
 					log.Printf("Error deleting directory %s: %v", outputDir, err)
