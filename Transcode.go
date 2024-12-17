@@ -53,6 +53,19 @@ func HandleTranscoding(r *bufio.Reader) ([]string, bool) {
 	p := mpb.New()
 	var wg sync.WaitGroup
 
+	var selections map[os.DirEntry][]string
+	selections = make(map[os.DirEntry][]string, len(files))
+	for _, tf := range files {
+		if !tf.IsDir() && isMediaFile(tf.Name()) {
+			//only ask about the first set of
+			subtitle := selectSubtitleTrack(r, tf.Name())
+			audioTrack := selectAudioTrack(r, tf.Name())
+			selections[tf] = make([]string, 2)
+			selections[tf][0] = subtitle
+			selections[tf][1] = audioTrack
+		}
+	}
+
 	for _, file := range files {
 		if !file.IsDir() && isMediaFile(file.Name()) {
 			inputFile := path.Join(cwd, file.Name())
@@ -62,9 +75,8 @@ func HandleTranscoding(r *bufio.Reader) ([]string, bool) {
 			if err != nil {
 				log.Fatal(err)
 			}
-
-			subtitle := selectSubtitleTrack(r, inputFile)
-			audioTrack := selectAudioTrack(r, inputFile)
+			subtitle := selections[file][0]
+			audioTrack := selections[file][1]
 
 			if UseMulti {
 				wg.Add(1)
@@ -276,48 +288,29 @@ func selectSubtitleTrack(r *bufio.Reader, inputFile string) string {
 }
 
 func getSubtitleTracks(inputFile string) ([]string, error) {
-	cmd := exec.Command("ffprobe", "-v", "error", "-select_streams", "s", "-show_entries", "stream=index:stream_tags=language,codec_name", "-of", "default=noprint_wrappers=1:nokey=1", "-print_format", "csv", inputFile)
+	cmd := exec.Command("ffprobe", "-v", "error", "-select_streams", "s", "-show_entries", "stream=index:stream_tags=language:stream=codec_name", "-of", "default=noprint_wrappers=1:nokey=1", "-print_format", "csv", inputFile)
 
-	// Create combined output buffer for stdout and stderr
 	var combinedOutput bytes.Buffer
 	cmd.Stdout = &combinedOutput
 	cmd.Stderr = &combinedOutput
 
-	// Construct log file name based on input file name
-	inputFileName := filepath.Base(inputFile)
-	logFileName := fmt.Sprintf("%s-subs-ffprobe.log", strings.TrimSuffix(inputFileName, filepath.Ext(inputFileName)))
-	logFilePath := filepath.Join(filepath.Dir(inputFile), logFileName)
-
 	if err := cmd.Run(); err != nil {
-		// Write combined output to log file for debugging, even if there's an error
-		if err := os.WriteFile(logFilePath, combinedOutput.Bytes(), 0644); err != nil {
-			return nil, fmt.Errorf("error running ffprobe and writing to log: %w; ffprobe error: %v", err, combinedOutput.String())
-		}
 		return nil, fmt.Errorf("error running ffprobe: %w; output: %s", err, combinedOutput.String())
 	}
 
-	// Write combined output to log file after successful execution
-	if err := os.WriteFile(logFilePath, combinedOutput.Bytes(), 0644); err != nil {
-		return nil, fmt.Errorf("ffprobe ran successfully, but error writing to log: %w", err)
-	}
-
-	lines := strings.Split(strings.TrimSpace(combinedOutput.String()), "\n") // Use combinedOutput
+	lines := strings.Split(strings.TrimSpace(combinedOutput.String()), "\n")
 	var subtitles []string
 	for _, line := range lines {
-		parts := strings.Split(line, ":")
-		if len(parts) >= 2 {
-			index := parts[0]
-			//codecName := parts[1]  // Extract the codec name if needed
-			// Check if the codec name is text-based (e.g., subrip, webvtt, mov_text, ass, srt)
-			isTextBased := strings.Contains(strings.ToLower(parts[1]), "subrip") || strings.Contains(strings.ToLower(parts[1]), "webvtt") || strings.Contains(strings.ToLower(parts[1]), "mov_text") || strings.Contains(strings.ToLower(parts[1]), "ass") || strings.Contains(strings.ToLower(parts[1]), "srt")
+		parts := strings.Split(line, ",")
+		if len(parts) >= 4 {
+			index := parts[len(parts)-1]
+			codecName := parts[2]
+			isTextBased := strings.Contains(strings.ToLower(codecName), "subrip") || strings.Contains(strings.ToLower(codecName), "webvtt") || strings.Contains(strings.ToLower(codecName), "mov_text") || strings.Contains(strings.ToLower(codecName), "ass")
 
 			if isTextBased {
 				subtitles = append(subtitles, index)
 			}
 		}
-	}
-	if len(lines) > len(subtitles) {
-		fmt.Println("Some subtitles were not displayed due to incompatible format")
 	}
 
 	return subtitles, nil
@@ -408,8 +401,8 @@ func getAvailableEncoder() string {
 	outputStr := string(output)
 
 	// Check for AMD AMF
-	if strings.Contains(outputStr, "h264_amf") {
-		return "h264_amf"
+	if strings.Contains(outputStr, "h264_vaapi") {
+		return "h264_vaapi"
 	}
 	// Check for NVIDIA NVENC
 	if strings.Contains(outputStr, "h264_nvenc") {
