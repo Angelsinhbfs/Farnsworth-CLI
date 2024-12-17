@@ -4,7 +4,6 @@ import (
 	"archive/zip"
 	"bufio"
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"github.com/vbauerster/mpb/v8"
 	"github.com/vbauerster/mpb/v8/decor"
@@ -26,13 +25,11 @@ func HandleTranscoding(r *bufio.Reader) ([]string, bool) {
 	cwd, _ = os.Getwd()
 	fmt.Print(PrintHeader())
 	fmt.Printf("%v:>", cwd)
-	// Navigate to source directory
 	for HandleInput(GatherInput(r)) {
 		fmt.Printf("%v:>", cwd)
 	}
 
 	var zipFiles []string
-	// Check for existing zip files
 	files, err := os.ReadDir(cwd)
 	if checkError(err) {
 		for _, file := range files {
@@ -42,7 +39,6 @@ func HandleTranscoding(r *bufio.Reader) ([]string, bool) {
 		}
 	}
 
-	// If zip files are found, offer to use them
 	if len(zipFiles) > 0 {
 		fmt.Println("Existing zip files found:")
 		for _, zipFile := range zipFiles {
@@ -54,56 +50,35 @@ func HandleTranscoding(r *bufio.Reader) ([]string, bool) {
 		}
 	}
 
-	// Create a new progress bar container
 	p := mpb.New()
-
 	var wg sync.WaitGroup
-	totalFiles := len(files)
-
-	// Create an overall progress bar
-	overallBar := p.AddBar(int64(totalFiles),
-		mpb.PrependDecorators(
-			decor.Name("Overall Progress: "),
-			decor.CountersNoUnit("%d / %d"),
-		),
-		mpb.AppendDecorators(decor.Percentage()),
-	)
 
 	for _, file := range files {
 		if !file.IsDir() && isMediaFile(file.Name()) {
 			inputFile := path.Join(cwd, file.Name())
 			fn := file.Name()
-			outputDir := path.Join(cwd, strings.TrimSuffix(fn, filepath.Ext(fn)))
+			outputDir := filepath.Join(cwd, strings.TrimSuffix(fn, filepath.Ext(fn))) // Correct outputDir
 			err := os.MkdirAll(outputDir, os.ModePerm)
 			if err != nil {
 				log.Fatal(err)
 			}
-			outputFile := path.Join(outputDir, "output.m3u8")
 
-			// Get the total number of frames
-			totalFrames, err := getTotalFrames(inputFile)
-			if err != nil {
-				log.Printf("Error getting total frames for file %s: %v\nguessing around 60000", fn, err)
-				totalFrames = 60000
-			}
+			subtitle := selectSubtitleTrack(r, inputFile)
+			audioTrack := selectAudioTrack(r, inputFile)
 
 			if UseMulti {
 				wg.Add(1)
-				go func(inputFile, outputFile string) {
-					fileBar := p.AddBar(totalFrames,
+				go func(inputFile, outputFile, subtitle, audioTrack, fn string) {
+					defer wg.Done()
+					fileBar := p.AddSpinner(1,
 						mpb.PrependDecorators(
 							decor.Name(fmt.Sprintf("Processing %s: ", fn)),
 						),
-						mpb.AppendDecorators(decor.Percentage()),
 					)
-					defer wg.Done()
-					err := TranscodeToHLS(inputFile, outputFile, fileBar)
+					err := TranscodeToHLSWithSubtitle(inputFile, outputDir, subtitle, audioTrack)
 					if err != nil {
 						log.Printf("Error transcoding file %s: %v", path.Base(inputFile), err)
 					}
-
-					// Increment the fileBar based on actual progress
-					fileBar.SetCurrent(totalFrames - 1) // Mark transcoding as complete
 
 					zipFileName := outputDir + ".zip"
 					err = ZipDirectory(outputDir, zipFileName)
@@ -113,31 +88,23 @@ func HandleTranscoding(r *bufio.Reader) ([]string, bool) {
 						zipFiles = append(zipFiles, zipFileName)
 					}
 
-					// Increment the fileBar to mark zipping as complete
-					fileBar.SetCurrent(totalFrames + 1) // Assuming zipping is one additional step
-
-					// Delete the output directory after zipping
 					err = os.RemoveAll(outputDir)
 					if err != nil {
 						log.Printf("Error deleting directory %s: %v", outputDir, err)
 					}
 
-					overallBar.Increment() // Update overall progress bar
-				}(inputFile, outputFile)
+					fileBar.Increment()
+				}(inputFile, outputDir, subtitle, audioTrack, fn)
 			} else {
-				// Create a progress bar for the file
-				fileBar := p.AddBar(totalFrames,
+				fileBar := p.AddSpinner(1,
 					mpb.PrependDecorators(
 						decor.Name(fmt.Sprintf("Processing %s: ", fn)),
 					),
-					mpb.AppendDecorators(decor.Percentage()),
 				)
-				err := TranscodeToHLS(inputFile, outputFile, fileBar)
+				err := TranscodeToHLSWithSubtitle(inputFile, outputDir, subtitle, audioTrack)
 				if err != nil {
 					log.Printf("Error transcoding file %s: %v", file.Name(), err)
 				}
-
-				fileBar.SetCurrent(totalFrames - 1) // Mark transcoding as complete
 
 				zipFileName := outputDir + ".zip"
 				err = ZipDirectory(outputDir, zipFileName)
@@ -147,22 +114,18 @@ func HandleTranscoding(r *bufio.Reader) ([]string, bool) {
 					zipFiles = append(zipFiles, zipFileName)
 				}
 
-				fileBar.SetCurrent(totalFrames + 1) // Mark zipping as complete
-
 				err = os.RemoveAll(outputDir)
 				if err != nil {
 					log.Printf("Error deleting directory %s: %v", outputDir, err)
 				}
 
-				overallBar.Increment() // Update overall progress bar
+				fileBar.Increment()
 			}
-		} else {
-			overallBar.Increment()
 		}
 	}
-	wg.Wait() // Wait for all goroutines to finish
+	wg.Wait()
 	p.Shutdown()
-	// Confirm or edit zip file names
+
 	for i, zipFile := range zipFiles {
 		newName := ConfirmOrEditZipName(r, zipFile)
 		if newName != zipFile {
@@ -170,7 +133,7 @@ func HandleTranscoding(r *bufio.Reader) ([]string, bool) {
 			if err != nil {
 				log.Printf("Error renaming file %s to %s: %v", zipFile, newName, err)
 			} else {
-				zipFiles[i] = newName // Update the slice with the new name
+				zipFiles[i] = newName
 			}
 		}
 	}
@@ -178,122 +141,257 @@ func HandleTranscoding(r *bufio.Reader) ([]string, bool) {
 	return zipFiles, true
 }
 
-// Function to get the total number of frames using ffprobe
-func getTotalFrames(inputFile string) (int64, error) {
-	cmd := exec.Command("ffprobe", "-v", "error", "-select_streams", "v:0", "-count_frames", "-show_entries", "stream=nb_read_frames", "-of", "json", inputFile)
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	err := cmd.Run()
-	if err != nil {
-		return 0, fmt.Errorf("error running ffprobe: %v", err)
-	}
-
-	var result map[string]interface{}
-	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
-		return 0, fmt.Errorf("error parsing ffprobe output: %v", err)
-	}
-
-	streams, ok := result["streams"].([]interface{})
-	if !ok || len(streams) == 0 {
-		return 0, fmt.Errorf("no streams found in ffprobe output")
-	}
-
-	stream, ok := streams[0].(map[string]interface{})
-	if !ok {
-		return 0, fmt.Errorf("invalid stream data in ffprobe output")
-	}
-
-	nbReadFrames, ok := stream["nb_read_frames"].(string)
-	if !ok {
-		return 0, fmt.Errorf("frame count not found in ffprobe output")
-	}
-
-	frameCount, err := strconv.ParseInt(nbReadFrames, 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("error converting frame count: %v", err)
-	}
-
-	return frameCount, nil
-}
-
-func isMediaFile(fileName string) bool {
-	// Define common video and audio file extensions
-	mediaExtensions := []string{".mp4", ".avi", ".mkv", ".mov", ".mp3", ".wav", ".flac", ".aac"}
-
-	ext := strings.ToLower(filepath.Ext(fileName))
-	for _, mediaExt := range mediaExtensions {
-		if ext == mediaExt {
-			return true
-		}
-	}
-	return false
-}
-
-func ConfirmOrEditZipName(reader *bufio.Reader, fullPath string) string {
-	// Extract the base name of the file
-	defaultName := filepath.Base(fullPath)
-	defaultName = strings.TrimSuffix(defaultName, filepath.Ext(defaultName))
-
-	fmt.Printf("Suggested zip file name: %s\n", defaultName)
-	fmt.Print("Press Enter to confirm or type a new name: ")
-	input, _ := reader.ReadString('\n')
-	input = strings.TrimSpace(input)
-	if input == "" {
-		return fullPath // Return the original full path if no change
-	}
-	// Construct the new full path with the edited file name
-	newFullPath := filepath.Join(filepath.Dir(fullPath), input)
-	return newFullPath
-}
-
-func TranscodeToHLS(inputFile, outputFile string, fileBar *mpb.Bar) error {
+func TranscodeToHLSWithSubtitle(inputFile, outputDir, subtitle, audioTrack string) error {
 	encoder := getAvailableEncoder()
 
-	var cmd *exec.Cmd
-	if encoder == "h264_nvenc" {
-		cmd = exec.Command("ffmpeg", "-i", inputFile, "-c:v", "h264_nvenc", "-c:a", "aac", "-strict", "experimental", "-start_number", "0", "-hls_time", "10", "-hls_list_size", "0", "-f", "hls", outputFile, "-progress", "pipe:2")
-	} else if encoder == "h264_amf" {
-		cmd = exec.Command("ffmpeg", "-i", inputFile, "-c:v", "h264_amf", "-c:a", "aac", "-strict", "experimental", "-start_number", "0", "-hls_time", "10", "-hls_list_size", "0", "-f", "hls", outputFile, "-progress", "pipe:2")
-	} else {
-		cmd = exec.Command("ffmpeg", "-i", inputFile, "-c:v", "libx264", "-c:a", "aac", "-strict", "experimental", "-start_number", "0", "-hls_time", "10", "-hls_list_size", "0", "-f", "hls", outputFile, "-progress", "pipe:2")
-	}
-
-	stderr, err := cmd.StderrPipe()
+	// Construct log file name based on input file name
+	inputFileName := filepath.Base(inputFile)
+	logFileName := fmt.Sprintf("%s-ffmpeg.log", strings.TrimSuffix(inputFileName, filepath.Ext(inputFileName)))
+	ffmpegLog, err := os.Create(filepath.Join("./", logFileName)) // Log file in current directory
 	if err != nil {
-		return fmt.Errorf("error creating stderr pipe: %v", err)
+		return fmt.Errorf("error creating ffmpeg log file: %w", err)
+	}
+	defer ffmpegLog.Close()
+
+	// Output filenames for video/audio and subtitle playlists
+	videoAudioOutput := filepath.Join(outputDir, "content.m3u8")
+
+	// Construct the base arguments for the FFmpeg command
+	baseArgs := []string{
+		"-i", inputFile,
+		"-map", "0:v:0",
+		"-c:v", encoder,
+		"-c:a", "aac",
+		"-ac", "2",
+		"-crf", "23",
 	}
 
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("error starting ffmpeg command: %v", err)
+	// Add audio track selection
+	if audioTrack != "" {
+		baseArgs = append(baseArgs, "-map", "0:a:"+audioTrack)
 	}
 
-	scanner := bufio.NewScanner(stderr)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "frame=") {
-			// Extract the frame number
-			parts := strings.Fields(line)
-			if len(parts) > 1 {
-				frameStr := parts[1]
-				frame, err := strconv.Atoi(frameStr)
-				if err == nil {
-					fileBar.SetCurrent(int64(frame)) // Update the progress bar with the current frame
-				}
-			}
+	// Handle subtitles
+	if subtitle != "" {
+		baseArgs = append(baseArgs,
+			"-map", "0:s:"+subtitle,
+			"-c:s", "webvtt",
+			"-var_stream_map", "v:0,a:0,s:0",
+		)
+	} else {
+		baseArgs = append(baseArgs, "-sn", "-var_stream_map", "v:0,a:0") // Suppress subtitles
+	}
+
+	baseArgs = append(baseArgs,
+		"-start_number", "0",
+		"-hls_time", "15",
+		"-hls_list_size", "0",
+		"-hls_segment_type", "mpegts",
+		"-f", "hls",
+		videoAudioOutput,
+	)
+
+	// Construct the FFmpeg command
+	cmd := exec.Command("ffmpeg", baseArgs...)
+	cmd.Stdout = ffmpegLog
+	cmd.Stderr = ffmpegLog
+
+	// Start and wait for the command
+	if err := cmd.Run(); err != nil {
+		// Read and include log content in the error message
+		logContent, readErr := os.ReadFile(ffmpegLog.Name())
+		if readErr != nil {
+			return fmt.Errorf("ffmpeg command failed: %w; error reading log: %v", err, readErr) // More specific error message
 		}
+		// Print the full command and log content for debugging
+		return fmt.Errorf("ffmpeg command failed: %w\nCommand: %s\nLog content:\n%s", err, cmd.String(), string(logContent)) // Include command and log
 	}
 
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("error reading ffmpeg output: %v", err)
+	// Write the master playlist after successful transcoding
+	masterPlaylist := path.Join(outputDir, "output.m3u8")
+	subtitlePlaylist := ""
+	if subtitle != "" {
+		subtitlePlaylist = "content_vtt.m3u8"
 	}
-
-	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("ffmpeg command failed: %v", err)
+	if err := writeMasterPlaylist(masterPlaylist, "content.m3u8", subtitlePlaylist); err != nil {
+		return fmt.Errorf("error writing master playlist: %w", err)
 	}
 
 	return nil
 }
 
+func writeMasterPlaylist(masterPlaylist, videoAudioOutput string, subtitleOutput ...string) error {
+	var content string
+	if len(subtitleOutput) > 0 {
+		content = `#EXTM3U
+#EXT-X-VERSION:3
+
+#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",DEFAULT=YES,AUTOSELECT=YES,LANGUAGE="en",URI="` + subtitleOutput[0] + `"
+
+#EXT-X-STREAM-INF:BANDWIDTH=5022487,AVERAGE-BANDWIDTH=1155141,RESOLUTION=1280x720,CODECS="avc1.6e001f,mp4a.40.2",SUBTITLES="subs"
+` + videoAudioOutput + `
+`
+	} else {
+		content = `#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-STREAM-INF:BANDWIDTH=5022487,AVERAGE-BANDWIDTH=1155141,RESOLUTION=1280x720,CODECS="avc1.6e001f,mp4a.40.2"
+` + videoAudioOutput + `
+`
+	}
+
+	err := os.WriteFile(masterPlaylist, []byte(content), 0644)
+	if err != nil {
+		return fmt.Errorf("error writing master playlist: %v", err)
+	}
+
+	return nil
+}
+
+func selectSubtitleTrack(r *bufio.Reader, inputFile string) string {
+	subtitles, err := getSubtitleTracks(inputFile)
+	if err != nil {
+		log.Printf("Error getting subtitles for file %s: %v", inputFile, err)
+		return ""
+	}
+
+	if len(subtitles) == 0 {
+		return ""
+	}
+
+	fmt.Printf("Available subtitles for %s:\n", filepath.Base(inputFile))
+	for i, subtitle := range subtitles {
+		fmt.Printf("%d: %s\n", i, subtitle)
+	}
+	choice := GetInputWithPrompt(r, "Select subtitle track number (or press Enter to skip): ")
+	if choice != "" {
+		index, err := strconv.Atoi(choice)
+		if err == nil && index >= 0 && index < len(subtitles) {
+			fmt.Println("selected subtitle")
+			fmt.Println(subtitles[index])
+			return choice //subtitles[index]
+		}
+	}
+
+	return ""
+}
+
+func getSubtitleTracks(inputFile string) ([]string, error) {
+	cmd := exec.Command("ffprobe", "-v", "error", "-select_streams", "s", "-show_entries", "stream=index:stream_tags=language,codec_name", "-of", "default=noprint_wrappers=1:nokey=1", "-print_format", "csv", inputFile)
+
+	// Create combined output buffer for stdout and stderr
+	var combinedOutput bytes.Buffer
+	cmd.Stdout = &combinedOutput
+	cmd.Stderr = &combinedOutput
+
+	// Construct log file name based on input file name
+	inputFileName := filepath.Base(inputFile)
+	logFileName := fmt.Sprintf("%s-ffprobe.log", strings.TrimSuffix(inputFileName, filepath.Ext(inputFileName)))
+	logFilePath := filepath.Join(filepath.Dir(inputFile), logFileName)
+
+	if err := cmd.Run(); err != nil {
+		// Write combined output to log file for debugging, even if there's an error
+		if err := os.WriteFile(logFilePath, combinedOutput.Bytes(), 0644); err != nil {
+			return nil, fmt.Errorf("error running ffprobe and writing to log: %w; ffprobe error: %v", err, combinedOutput.String())
+		}
+		return nil, fmt.Errorf("error running ffprobe: %w; output: %s", err, combinedOutput.String())
+	}
+
+	// Write combined output to log file after successful execution
+	if err := os.WriteFile(logFilePath, combinedOutput.Bytes(), 0644); err != nil {
+		return nil, fmt.Errorf("ffprobe ran successfully, but error writing to log: %w", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(combinedOutput.String()), "\n") // Use combinedOutput
+	var subtitles []string
+	for _, line := range lines {
+		parts := strings.Split(line, ":")
+		if len(parts) >= 2 {
+			index := parts[0]
+			//codecName := parts[1]  // Extract the codec name if needed
+			// Check if the codec name is text-based (e.g., subrip, webvtt, mov_text, ass, srt)
+			isTextBased := strings.Contains(strings.ToLower(parts[1]), "subrip") || strings.Contains(strings.ToLower(parts[1]), "webvtt") || strings.Contains(strings.ToLower(parts[1]), "mov_text") || strings.Contains(strings.ToLower(parts[1]), "ass") || strings.Contains(strings.ToLower(parts[1]), "srt")
+
+			if isTextBased {
+				subtitles = append(subtitles, index)
+			}
+		}
+	}
+	if len(lines) > len(subtitles) {
+		fmt.Println("Some subtitles were not displayed due to incompatible format")
+	}
+
+	return subtitles, nil
+}
+
+func selectAudioTrack(r *bufio.Reader, inputFile string) string {
+	audioTracks, err := getAudioTracks(inputFile)
+	if err != nil {
+		log.Printf("Error getting audio tracks for file %s: %v", inputFile, err)
+		return "" // Or return "0" to select the first track by default
+	}
+
+	if len(audioTracks) <= 1 {
+		return "" // No need to select if only one or no audio track
+	}
+
+	fmt.Printf("Available audio tracks for %s:\n", filepath.Base(inputFile))
+	for i, track := range audioTracks {
+		fmt.Printf("%d: %s\n", i, track)
+	}
+
+	for {
+		choice := GetInputWithPrompt(r, "Select audio track number: ")
+		if choice != "" {
+			index, err := strconv.Atoi(choice)
+			if err == nil && index >= 0 && index < len(audioTracks) {
+				return choice
+			} else {
+				fmt.Println("Invalid choice. Please select a valid track number.")
+			}
+		}
+	}
+
+}
+
+func getAudioTracks(inputFile string) ([]string, error) {
+	cmd := exec.Command("ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=index:stream_tags=language", "-of", "default=noprint_wrappers=1:nokey=1", "-print_format", "csv", inputFile)
+
+	// Create combined output buffer for stdout and stderr
+	var combinedOutput bytes.Buffer
+	cmd.Stdout = &combinedOutput
+	cmd.Stderr = &combinedOutput
+
+	// Construct log file name based on input file name
+	inputFileName := filepath.Base(inputFile)
+	logFileName := fmt.Sprintf("%s-ffprobe.log", strings.TrimSuffix(inputFileName, filepath.Ext(inputFileName)))
+	logFilePath := filepath.Join(filepath.Dir(inputFile), logFileName)
+
+	if err := cmd.Run(); err != nil {
+		// Write combined output to log file for debugging, even if there's an error
+		if err := os.WriteFile(logFilePath, combinedOutput.Bytes(), 0644); err != nil {
+			return nil, fmt.Errorf("error running ffprobe and writing to log: %w; ffprobe error: %v", err, combinedOutput.String())
+		}
+		return nil, fmt.Errorf("error running ffprobe: %w; output: %s", err, combinedOutput.String())
+	}
+
+	// Write combined output to log file after successful execution
+	if err := os.WriteFile(logFilePath, combinedOutput.Bytes(), 0644); err != nil {
+		return nil, fmt.Errorf("ffprobe ran successfully, but error writing to log: %w", err)
+	}
+
+	var audioTracks []string
+	lines := strings.Split(strings.TrimSpace(combinedOutput.String()), "\n") // Use combinedOutput
+
+	for _, line := range lines {
+		parts := strings.Split(line, ":")
+		if len(parts) >= 1 {
+			index := parts[0]
+			audioTracks = append(audioTracks, index)
+		}
+	}
+
+	return audioTracks, nil
+}
 func getAvailableEncoder() string {
 	if !UseHardwareAccel {
 		// Default to CPU encoding
@@ -434,4 +532,34 @@ func checkError(err error) bool {
 		return false
 	}
 	return true
+}
+
+func isMediaFile(fileName string) bool {
+	// Define common video and audio file extensions
+	mediaExtensions := []string{".mp4", ".avi", ".mkv", ".mov", ".mp3", ".wav", ".flac", ".aac"}
+
+	ext := strings.ToLower(filepath.Ext(fileName))
+	for _, mediaExt := range mediaExtensions {
+		if ext == mediaExt {
+			return true
+		}
+	}
+	return false
+}
+
+func ConfirmOrEditZipName(reader *bufio.Reader, fullPath string) string {
+	// Extract the base name of the file
+	defaultName := filepath.Base(fullPath)
+	defaultName = strings.TrimSuffix(defaultName, filepath.Ext(defaultName))
+
+	fmt.Printf("Suggested zip file name: %s\n", defaultName)
+	fmt.Print("Press Enter to confirm or type a new name: ")
+	input, _ := reader.ReadString('\n')
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return fullPath // Return the original full path if no change
+	}
+	// Construct the new full path with the edited file name
+	newFullPath := filepath.Join(filepath.Dir(fullPath), input)
+	return newFullPath
 }
