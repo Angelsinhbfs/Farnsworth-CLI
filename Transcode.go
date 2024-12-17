@@ -285,7 +285,7 @@ func getSubtitleTracks(inputFile string) ([]string, error) {
 
 	// Construct log file name based on input file name
 	inputFileName := filepath.Base(inputFile)
-	logFileName := fmt.Sprintf("%s-ffprobe.log", strings.TrimSuffix(inputFileName, filepath.Ext(inputFileName)))
+	logFileName := fmt.Sprintf("%s-subs-ffprobe.log", strings.TrimSuffix(inputFileName, filepath.Ext(inputFileName)))
 	logFilePath := filepath.Join(filepath.Dir(inputFile), logFileName)
 
 	if err := cmd.Run(); err != nil {
@@ -327,11 +327,11 @@ func selectAudioTrack(r *bufio.Reader, inputFile string) string {
 	audioTracks, err := getAudioTracks(inputFile)
 	if err != nil {
 		log.Printf("Error getting audio tracks for file %s: %v", inputFile, err)
-		return "" // Or return "0" to select the first track by default
+		return "0" // Or return "0" to select the first track by default
 	}
 
 	if len(audioTracks) <= 1 {
-		return "" // No need to select if only one or no audio track
+		return "0" // No need to select if only one or no audio track
 	}
 
 	fmt.Printf("Available audio tracks for %s:\n", filepath.Base(inputFile))
@@ -363,7 +363,7 @@ func getAudioTracks(inputFile string) ([]string, error) {
 
 	// Construct log file name based on input file name
 	inputFileName := filepath.Base(inputFile)
-	logFileName := fmt.Sprintf("%s-ffprobe.log", strings.TrimSuffix(inputFileName, filepath.Ext(inputFileName)))
+	logFileName := fmt.Sprintf("%s-audio-ffprobe.log", strings.TrimSuffix(inputFileName, filepath.Ext(inputFileName)))
 	logFilePath := filepath.Join(filepath.Dir(inputFile), logFileName)
 
 	if err := cmd.Run(); err != nil {
